@@ -2,6 +2,7 @@ package com.yourorg.jobscheduler.dependency;
 
 import com.yourorg.jobscheduler.entity.Job;
 import com.yourorg.jobscheduler.entity.JobDependency;
+import com.yourorg.jobscheduler.entity.JobStatus;
 import com.yourorg.jobscheduler.exception.CyclicDependencyException;
 import com.yourorg.jobscheduler.exception.JobNotFoundException;
 import com.yourorg.jobscheduler.repository.JobDependencyRepository;
@@ -13,9 +14,9 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.*;
 
 /**
- * Owns the JobDependency edges: CRUD plus cycle detection (Phase 2).
- * Topological sort and READY/BLOCKED eligibility are the remaining
- * Phase 2 items, layered on top of the same adjacency map built here.
+ * Owns the JobDependency edges: CRUD, cycle detection, topological
+ * ordering, and READY/BLOCKED eligibility -- the full DAG engine
+ * (Phase 2).
  */
 @Service
 @RequiredArgsConstructor
@@ -109,5 +110,88 @@ public class JobDependencyService {
             throw new IllegalArgumentException("Dependency edge not found with id: " + dependencyId);
         }
         dependencyRepository.deleteById(dependencyId);
+    }
+
+    /**
+     * Returns every job in a valid execution order, using Kahn's
+     * algorithm (repeatedly peel off nodes with in-degree zero). If
+     * fewer jobs come out than exist in the graph, a cycle is present
+     * -- which shouldn't be reachable given addDependency's guard, but
+     * this makes the method safe to call independently and doubles as
+     * a second line of defense.
+     */
+    @Transactional(readOnly = true)
+    public List<Job> getTopologicalOrder() {
+        List<Job> allJobs = jobRepository.findAll();
+        List<JobDependency> allEdges = dependencyRepository.findAll();
+
+        // in-degree here = number of jobs THIS job depends on that
+        // haven't been "removed" from the graph yet.
+        Map<Long, Integer> inDegree = new HashMap<>();
+        Map<Long, List<Long>> dependents = new HashMap<>(); // dependsOnJobId -> jobs waiting on it
+        Map<Long, Job> jobsById = new HashMap<>();
+
+        for (Job job : allJobs) {
+            inDegree.put(job.getId(), 0);
+            jobsById.put(job.getId(), job);
+        }
+        for (JobDependency edge : allEdges) {
+            Long jobId = edge.getJob().getId();
+            Long dependsOnJobId = edge.getDependsOnJob().getId();
+            inDegree.merge(jobId, 1, Integer::sum);
+            dependents.computeIfAbsent(dependsOnJobId, k -> new ArrayList<>()).add(jobId);
+        }
+
+        Deque<Long> queue = new ArrayDeque<>();
+        for (Map.Entry<Long, Integer> entry : inDegree.entrySet()) {
+            if (entry.getValue() == 0) {
+                queue.add(entry.getKey());
+            }
+        }
+
+        List<Job> ordered = new ArrayList<>();
+        while (!queue.isEmpty()) {
+            Long current = queue.poll();
+            ordered.add(jobsById.get(current));
+
+            for (Long dependent : dependents.getOrDefault(current, Collections.emptyList())) {
+                int remaining = inDegree.merge(dependent, -1, Integer::sum);
+                if (remaining == 0) {
+                    queue.add(dependent);
+                }
+            }
+        }
+
+        if (ordered.size() != allJobs.size()) {
+            throw new CyclicDependencyException(
+                "Cycle detected while computing topological order -- "
+                    + "graph should have been kept acyclic by addDependency");
+        }
+
+        return ordered;
+    }
+
+    /**
+     * A job is READY when it's still PENDING and every job it depends
+     * on has reached SUCCESS. Jobs with no dependencies at all are
+     * trivially READY. Everything else PENDING is BLOCKED (not
+     * returned here).
+     */
+    @Transactional(readOnly = true)
+    public List<Job> getReadyJobs() {
+        List<Job> readyJobs = new ArrayList<>();
+
+        for (Job job : jobRepository.findByStatus(JobStatus.PENDING)) {
+            List<JobDependency> upstream = dependencyRepository.findByJobId(job.getId());
+
+            boolean allDependenciesSucceeded = upstream.stream()
+                .allMatch(edge -> edge.getDependsOnJob().getStatus() == JobStatus.SUCCESS);
+
+            if (allDependenciesSucceeded) {
+                readyJobs.add(job);
+            }
+        }
+
+        return readyJobs;
     }
 }

@@ -63,4 +63,20 @@ public class JobController {
         dependencyService.removeDependency(dependencyId);
         return ResponseEntity.noContent().build();
     }
+
+    /** Full valid execution order across every job in the system. */
+    @GetMapping("/topological-order")
+    public List<JobResponse> getTopologicalOrder() {
+        return dependencyService.getTopologicalOrder().stream()
+            .map(JobResponse::from)
+            .toList();
+    }
+
+    /** Jobs that are PENDING with every dependency already SUCCESS. */
+    @GetMapping("/ready")
+    public List<JobResponse> getReadyJobs() {
+        return dependencyService.getReadyJobs().stream()
+            .map(JobResponse::from)
+            .toList();
+    }
 }
