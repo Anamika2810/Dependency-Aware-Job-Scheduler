@@ -4,6 +4,7 @@ import com.yourorg.jobscheduler.dependency.JobDependencyService;
 import com.yourorg.jobscheduler.dto.DependencyRequest;
 import com.yourorg.jobscheduler.dto.JobRequest;
 import com.yourorg.jobscheduler.dto.JobResponse;
+import com.yourorg.jobscheduler.dto.StatusUpdateRequest;
 import com.yourorg.jobscheduler.entity.Job;
 import com.yourorg.jobscheduler.service.JobService;
 import jakarta.validation.Valid;
@@ -47,6 +48,14 @@ public class JobController {
     public ResponseEntity<Void> delete(@PathVariable Long id) {
         jobService.delete(id);
         return ResponseEntity.noContent().build();
+    }
+
+    /** Moves a job's status, enforcing the state machine (Phase 3). */
+    @PatchMapping("/{id}/status")
+    public JobResponse transitionStatus(
+            @PathVariable Long id,
+            @Valid @RequestBody StatusUpdateRequest request) {
+        return JobResponse.from(jobService.transitionStatus(id, request.getNewStatus()));
     }
 
     /** Adds a dependency edge: {id} depends on {request.dependsOnJobId}. */
