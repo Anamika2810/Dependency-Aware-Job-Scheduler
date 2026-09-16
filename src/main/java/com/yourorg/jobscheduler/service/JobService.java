@@ -6,6 +6,8 @@ import com.yourorg.jobscheduler.entity.JobStatus;
 import com.yourorg.jobscheduler.exception.InvalidStateTransitionException;
 import com.yourorg.jobscheduler.exception.JobNotFoundException;
 import com.yourorg.jobscheduler.repository.JobRepository;
+import com.yourorg.jobscheduler.websocket.JobEventPublisher;
+import com.yourorg.jobscheduler.websocket.JobEventType;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -22,13 +24,16 @@ import java.util.Set;
 public class JobService {
 
     private final JobRepository jobRepository;
+    private final JobEventPublisher eventPublisher;
 
-    /**
-     * The state machine (Phase 3): for each status, the set of statuses
-     * it's legally allowed to move to next. Anything not listed here is
-     * rejected. Kept as data (a map) rather than an if/else chain so
-     * the rules are easy to read and easy to extend.
-     */
+    private static final Map<JobStatus, JobEventType> STATUS_TO_EVENT = new EnumMap<>(JobStatus.class);
+
+    static {
+        STATUS_TO_EVENT.put(JobStatus.READY, JobEventType.JOB_READY);
+        STATUS_TO_EVENT.put(JobStatus.RETRYING, JobEventType.JOB_RETRYING);
+        STATUS_TO_EVENT.put(JobStatus.PERMANENT_FAILURE, JobEventType.JOB_PERMANENTLY_FAILED);
+    }
+
     private static final Map<JobStatus, Set<JobStatus>> VALID_TRANSITIONS =
         new EnumMap<>(JobStatus.class);
 
@@ -75,11 +80,6 @@ public class JobService {
         jobRepository.delete(job);
     }
 
-    /**
-     * Moves a job to newStatus, but only if that transition is legal
-     * per VALID_TRANSITIONS. Throws InvalidStateTransitionException
-     * (mapped to 409 Conflict by GlobalExceptionHandler) otherwise.
-     */
     public Job transitionStatus(Long id, JobStatus newStatus) {
         Job job = getById(id);
         JobStatus currentStatus = job.getStatus();
@@ -95,6 +95,14 @@ public class JobService {
         }
 
         job.setStatus(newStatus);
-        return jobRepository.save(job);
+        Job saved = jobRepository.save(job);
+
+        JobEventType eventType = STATUS_TO_EVENT.get(newStatus);
+        if (eventType != null) {
+            eventPublisher.publish(eventType, saved.getId(), saved.getName(),
+                "Job moved to " + newStatus);
+        }
+
+        return saved;
     }
 }
